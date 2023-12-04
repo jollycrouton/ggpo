@@ -13,7 +13,7 @@ static const int DEFAULT_DISCONNECT_NOTIFY_START   = 750;
 
 Peer2PeerBackend::Peer2PeerBackend(GGPOSessionCallbacks *cb,
                                    const char *gamename,
-                                   uint16 localport,
+                                   GGPOConnection* ggpo_connection,
                                    int num_players,
                                    int input_size) :
     _num_players(num_players),
@@ -27,7 +27,7 @@ Peer2PeerBackend::Peer2PeerBackend(GGPOSessionCallbacks *cb,
    _callbacks = *cb;
    _synchronizing = true;
    _next_recommended_sleep = 0;
-
+   _ggpo_connection = ggpo_connection;
    /*
     * Initialize the synchronziation layer
     */
@@ -39,11 +39,11 @@ Peer2PeerBackend::Peer2PeerBackend(GGPOSessionCallbacks *cb,
    _sync.Init(config);
 
    /*
-    * Initialize the UDP port
+    * Initialize the CONNECTION port
     */
-   _udp.Init(localport, &_poll, this);
+   _connection.Init( &_poll, this, ggpo_connection);
 
-   _endpoints = new UdpProtocol[_num_players];
+   _endpoints = new ConnectionProtocol[_num_players];
    memset(_local_connect_status, 0, sizeof(_local_connect_status));
    for (int i = 0; i < ARRAY_SIZE(_local_connect_status); i++) {
       _local_connect_status[i].last_frame = -1;
@@ -52,7 +52,7 @@ Peer2PeerBackend::Peer2PeerBackend(GGPOSessionCallbacks *cb,
    /*
     * Preload the ROM
     */
-   _callbacks.begin_game(gamename);
+   _callbacks.begin_game(_callbacks.instance, gamename);
 }
   
 Peer2PeerBackend::~Peer2PeerBackend()
@@ -61,8 +61,7 @@ Peer2PeerBackend::~Peer2PeerBackend()
 }
 
 void
-Peer2PeerBackend::AddRemotePlayer(char *ip,
-                                  uint16 port,
+Peer2PeerBackend::AddRemotePlayer(int player_id,
                                   int queue)
 {
    /*
@@ -70,14 +69,13 @@ Peer2PeerBackend::AddRemotePlayer(char *ip,
     */
    _synchronizing = true;
    
-   _endpoints[queue].Init(&_udp, _poll, queue, ip, port, _local_connect_status);
+   _endpoints[queue].Init(&_connection, _poll, queue, player_id, _local_connect_status);
    _endpoints[queue].SetDisconnectTimeout(_disconnect_timeout);
    _endpoints[queue].SetDisconnectNotifyStart(_disconnect_notify_start);
    _endpoints[queue].Synchronize();
 }
 
-GGPOErrorCode Peer2PeerBackend::AddSpectator(char *ip,
-                                             uint16 port)
+GGPOErrorCode Peer2PeerBackend::AddSpectator(int player_id)
 {
    if (_num_spectators == GGPO_MAX_SPECTATORS) {
       return GGPO_ERRORCODE_TOO_MANY_SPECTATORS;
@@ -90,7 +88,7 @@ GGPOErrorCode Peer2PeerBackend::AddSpectator(char *ip,
    }
    int queue = _num_spectators++;
 
-   _spectators[queue].Init(&_udp, _poll, queue + 1000, ip, port, _local_connect_status);
+   _spectators[queue].Init(&_connection, _poll, queue + 1000, player_id, _local_connect_status);
    _spectators[queue].SetDisconnectTimeout(_disconnect_timeout);
    _spectators[queue].SetDisconnectNotifyStart(_disconnect_notify_start);
    _spectators[queue].Synchronize();
@@ -104,7 +102,7 @@ Peer2PeerBackend::DoPoll(int timeout)
    if (!_sync.InRollback()) {
       _poll.Pump(0);
 
-      PollUdpProtocolEvents();
+      PollConnectionProtocolEvents();
 
       if (!_synchronizing) {
          _sync.CheckSimulation(timeout);
@@ -155,7 +153,7 @@ Peer2PeerBackend::DoPoll(int timeout)
                GGPOEvent info;
                info.code = GGPO_EVENTCODE_TIMESYNC;
                info.u.timesync.frames_ahead = interval;
-               _callbacks.on_event(&info);
+               _callbacks.on_event(_callbacks.instance, &info);
                _next_recommended_sleep = current_frame + RECOMMENDATION_INTERVAL;
             }
          }
@@ -245,7 +243,7 @@ Peer2PeerBackend::AddPlayer(GGPOPlayer *player,
                             GGPOPlayerHandle *handle)
 {
    if (player->type == GGPO_PLAYERTYPE_SPECTATOR) {
-      return AddSpectator(player->u.remote.ip_address, player->u.remote.port);
+      return AddSpectator(player->player_id);
    }
 
    int queue = player->player_num - 1;
@@ -255,7 +253,7 @@ Peer2PeerBackend::AddPlayer(GGPOPlayer *player,
    *handle = QueueToPlayerHandle(queue);
 
    if (player->type == GGPO_PLAYERTYPE_REMOTE) {
-      AddRemotePlayer(player->u.remote.ip_address, player->u.remote.port, queue);
+      AddRemotePlayer(player->player_id, queue);
    }
    return GGPO_OK;
 }
@@ -349,27 +347,27 @@ Peer2PeerBackend::PollSyncEvents(void)
 }
 
 void
-Peer2PeerBackend::PollUdpProtocolEvents(void)
+Peer2PeerBackend::PollConnectionProtocolEvents(void)
 {
-   UdpProtocol::Event evt;
+   ConnectionProtocol::Event evt;
    for (int i = 0; i < _num_players; i++) {
       while (_endpoints[i].GetEvent(evt)) {
-         OnUdpProtocolPeerEvent(evt, i);
+         OnConnectionProtocolPeerEvent(evt, i);
       }
    }
    for (int i = 0; i < _num_spectators; i++) {
       while (_spectators[i].GetEvent(evt)) {
-         OnUdpProtocolSpectatorEvent(evt, i);
+         OnConnectionProtocolSpectatorEvent(evt, i);
       }
    }
 }
 
 void
-Peer2PeerBackend::OnUdpProtocolPeerEvent(UdpProtocol::Event &evt, int queue)
+Peer2PeerBackend::OnConnectionProtocolPeerEvent(ConnectionProtocol::Event &evt, int queue)
 {
-   OnUdpProtocolEvent(evt, QueueToPlayerHandle(queue));
+   OnConnectionProtocolEvent(evt, QueueToPlayerHandle(queue));
    switch (evt.type) {
-      case UdpProtocol::Event::Input:
+      case ConnectionProtocol::Event::Input:
          if (!_local_connect_status[queue].disconnected) {
             int current_remote_frame = _local_connect_status[queue].last_frame;
             int new_remote_frame = evt.u.input.input.frame;
@@ -382,7 +380,7 @@ Peer2PeerBackend::OnUdpProtocolPeerEvent(UdpProtocol::Event &evt, int queue)
          }
          break;
 
-   case UdpProtocol::Event::Disconnected:
+   case ConnectionProtocol::Event::Disconnected:
       DisconnectPlayer(QueueToPlayerHandle(queue));
       break;
    }
@@ -390,62 +388,62 @@ Peer2PeerBackend::OnUdpProtocolPeerEvent(UdpProtocol::Event &evt, int queue)
 
 
 void
-Peer2PeerBackend::OnUdpProtocolSpectatorEvent(UdpProtocol::Event &evt, int queue)
+Peer2PeerBackend::OnConnectionProtocolSpectatorEvent(ConnectionProtocol::Event &evt, int queue)
 {
    GGPOPlayerHandle handle = QueueToSpectatorHandle(queue);
-   OnUdpProtocolEvent(evt, handle);
+   OnConnectionProtocolEvent(evt, handle);
 
    GGPOEvent info;
 
    switch (evt.type) {
-   case UdpProtocol::Event::Disconnected:
+   case ConnectionProtocol::Event::Disconnected:
       _spectators[queue].Disconnect();
 
       info.code = GGPO_EVENTCODE_DISCONNECTED_FROM_PEER;
       info.u.disconnected.player = handle;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
 
       break;
    }
 }
 
 void
-Peer2PeerBackend::OnUdpProtocolEvent(UdpProtocol::Event &evt, GGPOPlayerHandle handle)
+Peer2PeerBackend::OnConnectionProtocolEvent(ConnectionProtocol::Event &evt, GGPOPlayerHandle handle)
 {
    GGPOEvent info;
 
    switch (evt.type) {
-   case UdpProtocol::Event::Connected:
+   case ConnectionProtocol::Event::Connected:
       info.code = GGPO_EVENTCODE_CONNECTED_TO_PEER;
       info.u.connected.player = handle;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
       break;
-   case UdpProtocol::Event::Synchronizing:
+   case ConnectionProtocol::Event::Synchronizing:
       info.code = GGPO_EVENTCODE_SYNCHRONIZING_WITH_PEER;
       info.u.synchronizing.player = handle;
       info.u.synchronizing.count = evt.u.synchronizing.count;
       info.u.synchronizing.total = evt.u.synchronizing.total;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
       break;
-   case UdpProtocol::Event::Synchronzied:
+   case ConnectionProtocol::Event::Synchronzied:
       info.code = GGPO_EVENTCODE_SYNCHRONIZED_WITH_PEER;
       info.u.synchronized.player = handle;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
 
       CheckInitialSync();
       break;
 
-   case UdpProtocol::Event::NetworkInterrupted:
+   case ConnectionProtocol::Event::NetworkInterrupted:
       info.code = GGPO_EVENTCODE_CONNECTION_INTERRUPTED;
       info.u.connection_interrupted.player = handle;
       info.u.connection_interrupted.disconnect_timeout = evt.u.network_interrupted.disconnect_timeout;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
       break;
 
-   case UdpProtocol::Event::NetworkResumed:
+   case ConnectionProtocol::Event::NetworkResumed:
       info.code = GGPO_EVENTCODE_CONNECTION_RESUMED;
       info.u.connection_resumed.player = handle;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
       break;
    }
 }
@@ -509,7 +507,7 @@ Peer2PeerBackend::DisconnectPlayerQueue(int queue, int syncto)
 
    info.code = GGPO_EVENTCODE_DISCONNECTED_FROM_PEER;
    info.u.disconnected.player = QueueToPlayerHandle(queue);
-   _callbacks.on_event(&info);
+   _callbacks.on_event(_callbacks.instance, &info);
 
    CheckInitialSync();
 }
@@ -581,22 +579,21 @@ Peer2PeerBackend::PlayerHandleToQueue(GGPOPlayerHandle player, int *queue)
    return GGPO_OK;
 }
 
- 
 void
-Peer2PeerBackend::OnMsg(sockaddr_in &from, UdpMsg *msg, int len)
+Peer2PeerBackend::OnMsg(int player_id, ConnectionMsg* msg, int len)
 {
-   for (int i = 0; i < _num_players; i++) {
-      if (_endpoints[i].HandlesMsg(from, msg)) {
-         _endpoints[i].OnMsg(msg, len);
-         return;
-      }
-   }
-   for (int i = 0; i < _num_spectators; i++) {
-      if (_spectators[i].HandlesMsg(from, msg)) {
-         _spectators[i].OnMsg(msg, len);
-         return;
-      }
-   }
+	for (int i = 0; i < _num_players; i++) {
+		if (_endpoints[i].HandlesMsg(player_id, msg)) {
+			_endpoints[i].OnMsg(msg, len);
+			return;
+		}
+	}
+	for (int i = 0; i < _num_spectators; i++) {
+		if (_spectators[i].HandlesMsg(player_id, msg)) {
+			_spectators[i].OnMsg(msg, len);
+			return;
+		}
+	}
 }
 
 void
@@ -621,7 +618,7 @@ Peer2PeerBackend::CheckInitialSync()
 
       GGPOEvent info;
       info.code = GGPO_EVENTCODE_RUNNING;
-      _callbacks.on_event(&info);
+      _callbacks.on_event(_callbacks.instance, &info);
       _synchronizing = false;
    }
 }

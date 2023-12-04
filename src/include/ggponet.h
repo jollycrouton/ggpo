@@ -74,6 +74,7 @@ typedef struct GGPOPlayer {
    int               size;
    GGPOPlayerType    type;
    int               player_num;
+   int              player_id;
    union {
       struct {
       } local;
@@ -116,6 +117,20 @@ typedef enum {
 
 #define GGPO_INVALID_HANDLE      (-1)
 
+typedef struct {
+    /*
+    * Instance of the connection class
+    */
+    void* instance;
+   /*
+     *send buffer to the opponent.
+   */
+    void(__cdecl* send_to)(void* self,  const char* buffer, int len, int flags, int player_num);
+    /*
+    * poll connection socket, put the sending players id to the player_num container and return the length of packet
+    */
+    int(__cdecl* receive_from)(void* self, char* buffer, int len, int flags, int* player_num);
+} GGPOConnection;
 
 /*
  * The GGPOEventCode enumeration describes what type of event just happened.
@@ -195,11 +210,12 @@ typedef struct {
  * functions during the game.  All callback functions must be implemented.
  */
 typedef struct {
+    void* instance;
    /*
     * begin_game callback - This callback has been deprecated.  You must
     * implement it, but should ignore the 'game' parameter.
     */
-   bool (__cdecl *begin_game)(const char *game);
+   bool (__cdecl *begin_game)(void* self,const char *game);
 
    /*
     * save_game_state - The client should allocate a buffer, copy the
@@ -207,7 +223,7 @@ typedef struct {
     * length into the *len parameter.  Optionally, the client can compute
     * a checksum of the data and store it in the *checksum argument.
     */
-   bool (__cdecl *save_game_state)(unsigned char **buffer, int *len, int *checksum, int frame);
+   bool (__cdecl *save_game_state)(void* self, unsigned char **buffer, int *len, int *checksum, int frame);
 
    /*
     * load_game_state - GGPO.net will call this function at the beginning
@@ -216,20 +232,20 @@ typedef struct {
     * should make the current game state match the state contained in the
     * buffer.
     */
-   bool (__cdecl *load_game_state)(unsigned char *buffer, int len);
+   bool (__cdecl *load_game_state)(void* self, unsigned char *buffer, int len);
 
    /*
     * log_game_state - Used in diagnostic testing.  The client should use
     * the ggpo_log function to write the contents of the specified save
     * state in a human readible form.
     */
-   bool (__cdecl *log_game_state)(char *filename, unsigned char *buffer, int len);
+   bool (__cdecl *log_game_state)(void* self, char *filename, unsigned char *buffer, int len);
 
    /*
     * free_buffer - Frees a game state allocated in save_game_state.  You
     * should deallocate the memory contained in the buffer.
     */
-   void (__cdecl *free_buffer)(void *buffer);
+   void (__cdecl *free_buffer)(void* self, void *buffer);
 
    /*
     * advance_frame - Called during a rollback.  You should advance your game
@@ -240,13 +256,13 @@ typedef struct {
     *
     * The flags parameter is reserved.  It can safely be ignored at this time.
     */
-   bool (__cdecl *advance_frame)(int flags);
+   bool (__cdecl *advance_frame)(void* self, int flags);
 
    /* 
     * on_event - Notification that something has happened.  See the GGPOEventCode
     * structure above for more information.
     */
-   bool (__cdecl *on_event)(GGPOEvent *info);
+   bool (__cdecl *on_event)(void* self, GGPOEvent *info);
 } GGPOSessionCallbacks;
 
 /*
@@ -321,10 +337,10 @@ typedef struct GGPONetworkStats {
  */
 GGPO_API GGPOErrorCode __cdecl ggpo_start_session(GGPOSession **session,
                                                   GGPOSessionCallbacks *cb,
+                                                  GGPOConnection* ggpo_connection,
                                                   const char *game,
                                                   int num_players,
-                                                  int input_size,
-                                                  unsigned short localport);
+                                                  int input_size);
 
 
 /*
@@ -401,12 +417,11 @@ GGPO_API GGPOErrorCode __cdecl ggpo_start_synctest(GGPOSession **session,
  */
 GGPO_API GGPOErrorCode __cdecl ggpo_start_spectating(GGPOSession **session,
                                                      GGPOSessionCallbacks *cb,
+                                                     GGPOConnection* ggpo_connection,
                                                      const char *game,
                                                      int num_players,
                                                      int input_size,
-                                                     unsigned short local_port,
-                                                     char *host_ip,
-                                                     unsigned short host_port);
+                                                     int player_id);
 
 /*
  * ggpo_close_session --
